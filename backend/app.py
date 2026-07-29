@@ -84,7 +84,7 @@ with app.app_context():
         try:
             db.session.execute(db.text('ALTER TABLE interactions ADD COLUMN ' + col + ' TEXT DEFAULT \'\''))
             db.session.commit()
-        except:
+        except Exception:
             db.session.rollback()
 
 # CORS
@@ -193,22 +193,21 @@ def reports():
 
 
 # ============================================================
-# API — Chat (Web Widget) + Timeline
 # ============================================================
-
-
-def reports():
-    return render_template('dashboard.html')
-
-
-# ============================================================
-# API — Chat (Web Widget) + Timeline
+# Helpers
 # ============================================================
 
 def rd_now():
     from datetime import timezone
     return datetime.now(timezone.utc) - timedelta(hours=4)
 
+# ============================================================
+# API — Health + Chat + Timeline
+# ============================================================
+
+@app.route('/api/health')
+def api_health():
+    return jsonify({'status': 'ok', 'time': rd_now().isoformat()})
 
 @app.route('/api/chat', methods=['POST'])
 def api_chat():
@@ -223,22 +222,22 @@ def api_chat():
             try:
                 from models import Lead
                 t = lm.group(1)
-                nm = _re.search(r'Nombre:\s*(.+)', t)
-                pm = _re.search(r'Telefono:\s*(.+)', t)
+                nm = _re.search(r'Nombre:\\s*(.+)', t)
+                pm = _re.search(r'Telefono:\\s*(.+)', t)
                 if nm and pm:
                     n, p = nm.group(1).strip(), pm.group(1).strip()
                     lead = Lead.query.filter_by(phone=p).first()
                     if not lead:
-                        bm = _re.search(r'Negocio:\s*(.+)', t)
-                        em = _re.search(r'Correo:\s*(.+)', t)
-                        sm = _re.search(r'Servicio:\s*(.+)', t)
+                        bm = _re.search(r'Negocio:\\s*(.+)', t)
+                        em = _re.search(r'Correo:\\s*(.+)', t)
+                        sm = _re.search(r'Servicio:\\s*(.+)', t)
                         lead = Lead(name=n, phone=p, email=em.group(1).strip() if em else '', source='web_chat', status='caliente', business=bm.group(1).strip() if bm else '', notes='Servicio: ' + (sm.group(1).strip() if sm else ''))
                         db.session.add(lead)
                         db.session.flush()
                     else:
                         lead.status = 'caliente'
                     db.session.commit()
-            except:
+            except Exception:
                 pass
         return jsonify({'response': reply, 'success': True})
     except Exception as e:

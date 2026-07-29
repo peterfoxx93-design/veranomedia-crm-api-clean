@@ -141,10 +141,12 @@ class Appointment(db.Model):
 
 def init_db(app):
     """Initialize database"""
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-        'DATABASE_URL',
-        f'sqlite:///{os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "vm_crm.db")}'
-    )
+    database_url = os.environ.get('DATABASE_URL') or ''
+    if database_url and database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+    if not database_url:
+        database_url = f'sqlite:///{os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "vm_crm.db")}'
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     app.config['SECRET_KEY'] = os.environ.get('CRM_SECRET_KEY', 'vm-crm-prod-key-2026')
 
