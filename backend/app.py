@@ -23,8 +23,9 @@ sys.path.insert(0, os.path.dirname(__file__))
 from models import db, User, Lead, Interaction, Appointment, init_db
 
 # Resend — VM has its own domain!
-RESEND_API_KEY = os.environ.get('RESEND_API_KEY', 're_8WZh1FS5_NNxkw7opeabxFV7QixMu97cH')
-resend.api_key = RESEND_API_KEY
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
 RESEND_FROM = os.environ.get('RESEND_FROM', 'hola@veranomedia.digital')
 RESEND_TO = os.environ.get('RESEND_TO', 'espartaco.rd@gmail.com')
 
