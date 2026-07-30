@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "04-script-video": {
+      "source": "minhnv0807/fullstack-mkt-skills",
+      "sourceType": "github",
+      "skillPath": "skills/vi/04-script-video/SKILL.md",
+      "computedHash": "2c4ae89b6dd17c44c7994ef88287ba757ba356eee45ceadc19eb6af174579383"
+    }
+  }
+}
