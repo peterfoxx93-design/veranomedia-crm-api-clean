@@ -2,6 +2,7 @@ FROM python:3.13-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 COPY requirements.txt .
@@ -11,7 +12,5 @@ COPY backend ./backend
 COPY frontend ./frontend
 COPY maria_prompt_web.txt ./maria_prompt_web.txt
 
-WORKDIR /app/backend
-
 EXPOSE 8080
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "120"]
+CMD ["gunicorn", "backend.app:app", "--bind", "0.0.0.0:8080", "--workers", "1", "--timeout", "120"]
