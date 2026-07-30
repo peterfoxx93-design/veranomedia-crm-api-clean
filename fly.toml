@@ -4,7 +4,6 @@ kill_timeout = 5
 processes = []
 
 [env]
-FLASK_APP = "backend.app"
 PORT = "8080"
 
 [[services]]
