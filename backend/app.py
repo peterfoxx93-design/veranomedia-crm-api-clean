@@ -20,7 +20,11 @@ import resend
 # Add parent to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from models import db, User, Lead, Interaction, Appointment, init_db
+from models import (db, User, Lead, Interaction, Appointment, init_db,
+                    LeadEvidence, AgentTask,
+                    EVIDENCE_VERIFIED, EVIDENCE_PROBABLE, EVIDENCE_POSSIBLE,
+                    EVIDENCE_BANDS,
+                    TASK_PENDING, TASK_LEASED, TASK_DONE, TASK_FAILED)
 
 # Resend — VM has its own domain!
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
@@ -89,7 +93,7 @@ with app.app_context():
             db.session.rollback()
 
 # CORS
-CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'https://veranomedia.digital,https://*.vercel.app')
+CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'https://veranomedia.click,https://*.vercel.app')
 CORS(app, origins=CORS_ORIGINS.split(','), supports_credentials=True)
 
 login_manager = LoginManager()
@@ -112,7 +116,7 @@ def call_ai(user_msg, history=None):
         headers={
             'Authorization': 'Bearer ' + os.environ.get('OPENROUTER_API_KEY', ''),
             'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://veranomedia.digital',
+            'HTTP-Referer': 'https://veranomedia.click',
         },
         json={'model': CHAT_MODEL, 'messages': messages, 'max_tokens': 800, 'temperature': 0.7},
         timeout=30,
@@ -787,6 +791,268 @@ def calculate_lead_score(lead):
         score += 1
 
     return min(score, 10)
+
+
+# ============================================================
+# SISTEMA DE EVIDENCIA (adaptado de trycompai/crm)
+# ============================================================
+
+@app.route('/api/leads/<int:lead_id>/evidence', methods=['GET'])
+def get_evidence(lead_id):
+    """Obtiene toda la evidencia de un lead"""
+    lead = Lead.query.get_or_404(lead_id)
+    evidence = lead.evidence.all()
+    return jsonify([ev.to_dict() for ev in evidence])
+
+
+@app.route('/api/leads/<int:lead_id>/evidence', methods=['POST'])
+def add_evidence(lead_id):
+    """Agrega evidencia a un lead. Nada se adivina — cada dato tiene fuente."""
+    lead = Lead.query.get_or_404(lead_id)
+    data = request.get_json() or {}
+
+    field = data.get('field', '')
+    value = data.get('value', '')
+    band = data.get('band', EVIDENCE_POSSIBLE)
+    source = data.get('source', '')
+    source_type = data.get('source_type', '')
+    confirmed_by = data.get('confirmed_by', '')
+
+    if not field or not value:
+        return jsonify({'error': 'field y value son requeridos'}), 400
+
+    if band not in EVIDENCE_BANDS:
+        return jsonify({'error': f'band debe ser: {", ".join(EVIDENCE_BANDS.keys())}'}), 400
+
+    ev = LeadEvidence(
+        lead_id=lead_id,
+        field=field,
+        value=value,
+        band=band,
+        source=source,
+        source_type=source_type,
+        confirmed_by=confirmed_by,
+    )
+    db.session.add(ev)
+    db.session.commit()
+    return jsonify(ev.to_dict()), 201
+
+
+@app.route('/api/leads/<int:lead_id>/evidence/<int:ev_id>', methods=['PATCH'])
+def update_evidence(lead_id, ev_id):
+    """Actualiza banda de evidencia (ej: confirmar possible → verified)"""
+    ev = LeadEvidence.query.get_or_404(ev_id)
+    data = request.get_json() or {}
+
+    if 'band' in data:
+        if data['band'] not in EVIDENCE_BANDS:
+            return jsonify({'error': 'band inválida'}), 400
+        ev.band = data['band']
+    if 'confirmed_by' in data:
+        ev.confirmed_by = data['confirmed_by']
+
+    db.session.commit()
+    return jsonify(ev.to_dict())
+
+
+@app.route('/api/leads/<int:lead_id>/evidence/score', methods=['GET'])
+def evidence_score(lead_id):
+    """Score de evidencia del lead (suma ponderada por banda)"""
+    lead = Lead.query.get_or_404(lead_id)
+    score = lead.evidence_score()
+    breakdown = {}
+    for band_key, band_info in EVIDENCE_BANDS.items():
+        count = lead.evidence.filter_by(band=band_key).count()
+        breakdown[band_key] = {
+            'count': count,
+            'weight': band_info['weight'],
+            'total': count * band_info['weight'],
+            'label': band_info['label'],
+        }
+    return jsonify({'total_score': score, 'breakdown': breakdown})
+
+
+# ============================================================
+# COLA DE TRABAJO CON LEASING (adaptado de trycompai/crm)
+# ============================================================
+
+@app.route('/api/tasks', methods=['GET'])
+def list_tasks():
+    """Lista tareas de la cola. Filtros: status, task_type"""
+    query = AgentTask.query
+    status = request.args.get('status')
+    if status:
+        query = query.filter_by(status=status)
+    task_type = request.args.get('task_type')
+    if task_type:
+        query = query.filter_by(task_type=task_type)
+    tasks = query.order_by(AgentTask.created_at.desc()).limit(100).all()
+    return jsonify([t.to_dict() for t in tasks])
+
+
+@app.route('/api/tasks', methods=['POST'])
+def create_task():
+    """Crea una nueva tarea en la cola"""
+    data = request.get_json() or {}
+    task_type = data.get('task_type', '')
+    if not task_type:
+        return jsonify({'error': 'task_type es requerido'}), 400
+
+    due_at = None
+    if data.get('due_at'):
+        try:
+            due_at = datetime.fromisoformat(data['due_at'])
+        except ValueError:
+            pass
+
+    task = AgentTask.create(
+        task_type=task_type,
+        lead_id=data.get('lead_id'),
+        payload=data.get('payload', ''),
+        due_at=due_at,
+    )
+    return jsonify(task.to_dict()), 201
+
+
+@app.route('/api/tasks/lease', methods=['POST'])
+def lease_task():
+    """Un agente toma la siguiente tarea disponible"""
+    data = request.get_json() or {}
+    agent_id = data.get('agent_id', 'hermes-agent')
+    lease_minutes = data.get('lease_minutes', 30)
+
+    task = AgentTask.lease_next(agent_id, lease_minutes)
+    if task:
+        return jsonify(task.to_dict())
+    return jsonify({'message': 'No hay tareas disponibles'}), 404
+
+
+@app.route('/api/tasks/<int:task_id>/complete', methods=['POST'])
+def complete_task(task_id):
+    """Marca una tarea como completada"""
+    data = request.get_json() or {}
+    result = data.get('result', '')
+    task = AgentTask.complete(task_id, result)
+    if task:
+        return jsonify(task.to_dict())
+    return jsonify({'error': 'Tarea no encontrada'}), 404
+
+
+@app.route('/api/tasks/<int:task_id>/fail', methods=['POST'])
+def fail_task(task_id):
+    """Marca una tarea como fallida"""
+    data = request.get_json() or {}
+    error = data.get('error', '')
+    task = AgentTask.fail(task_id, error)
+    if task:
+        return jsonify(task.to_dict())
+    return jsonify({'error': 'Tarea no encontrada'}), 404
+
+
+@app.route('/api/tasks/stats', methods=['GET'])
+def task_stats():
+    """Estadísticas de la cola de trabajo"""
+    stats = {
+        'pending': AgentTask.query.filter_by(status=TASK_PENDING).count(),
+        'leased': AgentTask.query.filter_by(status=TASK_LEASED).count(),
+        'done': AgentTask.query.filter_by(status=TASK_DONE).count(),
+        'failed': AgentTask.query.filter_by(status=TASK_FAILED).count(),
+    }
+    stats['total'] = sum(stats.values())
+    return jsonify(stats)
+
+
+# ============================================================
+# PROSPECCIÓN — Importar leads desde scraping
+# ============================================================
+
+@app.route('/api/leads/import', methods=['POST'])
+def import_leads():
+    """Importa leads desde un JSON (resultado de prospección con Firecrawl)"""
+    data = request.get_json() or {}
+    leads_data = data.get('leads', [])
+
+    if not leads_data:
+        return jsonify({'error': 'Se requiere array "leads"'}), 400
+
+    imported = 0
+    skipped = 0
+    errors = []
+
+    for item in leads_data:
+        try:
+            # Verificar duplicado por nombre + teléfono
+            existing = Lead.query.filter_by(
+                name=item.get('name', ''),
+                phone=item.get('phone', '')
+            ).first()
+            if existing:
+                skipped += 1
+                continue
+
+            lead = Lead(
+                name=item.get('name', ''),
+                business=item.get('business', item.get('name', '')),
+                phone=item.get('phone', ''),
+                email=item.get('email', ''),
+                website=item.get('website', ''),
+                location=item.get('direccion', item.get('location', '')),
+                ciudad=item.get('ciudad', ''),
+                categoria=item.get('categoria', ''),
+                google_business=item.get('google_business', False),
+                whatsapp_visible=item.get('whatsapp_visible', False),
+                google_rating=item.get('rating'),
+                num_reviews=item.get('num_reviews', 0),
+                source='prospeccion',
+                status='frio',
+            )
+            db.session.add(lead)
+            db.session.flush()  # obtener ID
+
+            # Crear evidencia para cada dato encontrado
+            if item.get('phone'):
+                ev = LeadEvidence(
+                    lead_id=lead.id,
+                    field='phone',
+                    value=item['phone'],
+                    band=EVIDENCE_PROBABLE,
+                    source=item.get('source', 'google_maps'),
+                    source_type='scraping',
+                )
+                db.session.add(ev)
+
+            if item.get('website'):
+                ev = LeadEvidence(
+                    lead_id=lead.id,
+                    field='website',
+                    value=item['website'],
+                    band=EVIDENCE_PROBABLE,
+                    source=item.get('source', 'google_maps'),
+                    source_type='scraping',
+                )
+                db.session.add(ev)
+
+            if item.get('rating'):
+                ev = LeadEvidence(
+                    lead_id=lead.id,
+                    field='google_rating',
+                    value=str(item['rating']),
+                    band=EVIDENCE_PROBABLE,
+                    source='google_maps',
+                    source_type='scraping',
+                )
+                db.session.add(ev)
+
+            imported += 1
+        except Exception as e:
+            errors.append(f"{item.get('name', '?')}: {str(e)}")
+
+    db.session.commit()
+    return jsonify({
+        'imported': imported,
+        'skipped': skipped,
+        'errors': errors,
+    })
 
 
 # ============================================================
