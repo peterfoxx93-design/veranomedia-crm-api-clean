@@ -30,7 +30,7 @@ from models import (db, User, Lead, Interaction, Appointment, init_db,
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
 if RESEND_API_KEY:
     resend.api_key = RESEND_API_KEY
-RESEND_FROM = os.environ.get('RESEND_FROM', 'hola@veranomedia.digital')
+RESEND_FROM = os.environ.get('RESEND_FROM', 'hola@veranomedia.click')
 RESEND_TO = os.environ.get('RESEND_TO', 'espartaco.rd@gmail.com')
 
 def send_vm_email(subject, html_body, to=None):
